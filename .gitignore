@@ -52,3 +52,9 @@ output/project.log
 # 保留 output/ 目录但排除运行日志
 # parquet / csv 结果文件会正常提交（包含项目交付物）
 # ============================================================
+
+# 序列文件 — 超大（train 2.7GB / val 776MB / test 388MB），可随时重建
+output/sequences/
+
+# SMOTE 过采样 — 447MB，超过 GitHub 100MB 单文件限制
+output/train_smote.parquet

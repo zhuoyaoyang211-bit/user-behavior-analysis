@@ -62,6 +62,24 @@ def build_samples(
     df = pd.read_parquet(input_path)
     logger.info("输入: %s 行 × %s 列", f"{len(df):,}", len(df.columns))
 
+    # 1.5 从 feature_wide_table 获取 item_id
+    # selected_features 和 feature_wide_table 行数一致、行序一致，直接拼接
+    fw_path = os.path.join(os.path.dirname(input_path), "feature_wide_table.parquet")
+    if os.path.exists(fw_path):
+        logger.info("从 %s 加载 item_id ...", fw_path)
+        fw = pd.read_parquet(fw_path, columns=["item_id"])
+        if len(fw) == len(df):
+            df["item_id"] = fw["item_id"].values
+            ID_COLS = ["user_id", "item_id"]
+            logger.info("已追加 item_id 列，ID 列: %s", ID_COLS)
+        else:
+            logger.warning(
+                "feature_wide_table 行数 (%s) 与 selected_features (%s) 不一致，跳过匹配",
+                f"{len(fw):,}", f"{len(df):,}",
+            )
+    else:
+        logger.warning("未找到 feature_wide_table.parquet，跳过 item_id 匹配")
+
     # ---- 2. 构建二分类标签 ----
     # buy_path_type: 0=没买, 1/2/3/4=不同购买路径
     # label: 0=没买(负样本), 1=买了(正样本)
