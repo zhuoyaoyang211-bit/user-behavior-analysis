@@ -151,7 +151,8 @@ def apply_undersample(
     df_under = pd.DataFrame(X_res, columns=feature_cols)
     df_under[label_col] = y_res.astype(int)
 
-    path = os.path.join(output_dir, "train_undersample.parquet")
+    # 文件名带上 random_state，避免多次调用互相覆盖
+    path = os.path.join(output_dir, f"train_undersample_rs{random_state}.parquet")
     df_under.to_parquet(path, index=False)
     logger.info(
         "欠采样训练集已保存: %s (%s 行)", path, f"{len(df_under):,}"

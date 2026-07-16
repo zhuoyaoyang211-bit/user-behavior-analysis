@@ -1,0 +1,138 @@
+{
+  "smote": {
+    "before_shape": [
+      3285998,
+      26
+    ],
+    "after_shape": [
+      6564648,
+      27
+    ],
+    "before_pos_ratio": 0.0011180773694932256,
+    "after_pos_ratio": 0.5,
+    "path": "output/train_smote.parquet"
+  },
+  "undersample": [
+    {
+      "before_shape": [
+        3285998,
+        26
+      ],
+      "after_shape": [
+        7348,
+        27
+      ],
+      "before_pos_ratio": 0.0011180773694932256,
+      "after_pos_ratio": 0.5,
+      "path": "output/train_undersample_rs42.parquet"
+    },
+    {
+      "before_shape": [
+        3285998,
+        26
+      ],
+      "after_shape": [
+        7348,
+        27
+      ],
+      "before_pos_ratio": 0.0011180773694932256,
+      "after_pos_ratio": 0.5,
+      "path": "output/train_undersample_rs100.parquet"
+    },
+    {
+      "before_shape": [
+        3285998,
+        26
+      ],
+      "after_shape": [
+        7348,
+        27
+      ],
+      "before_pos_ratio": 0.0011180773694932256,
+      "after_pos_ratio": 0.5,
+      "path": "output/train_undersample_rs2024.parquet"
+    }
+  ],
+  "class_weight": {
+    "class_weights": {
+      "0": 0.5005596644328836,
+      "1": 447.1962438758846
+    },
+    "n_pos": 3674,
+    "n_neg": 3282324
+  },
+  "results": [
+    {
+      "method": "SMOTE 过采样",
+      "precision": 0.029286177371397912,
+      "recall": 0.9513435003631082,
+      "f1": 0.05682311095688384,
+      "auc": 0.9859906796801718,
+      "train_score": 0.9611773548254224,
+      "n_train": 6564648,
+      "C": 1.0,
+      "n_zero_coef": 0
+    },
+    {
+      "method": "类别权重",
+      "precision": 0.028879110187294076,
+      "recall": 0.9484386347131445,
+      "f1": 0.05605150214592275,
+      "auc": 0.986675501703891,
+      "train_score": 0.9609661965710266,
+      "n_train": 3285998,
+      "C": 1.0,
+      "n_zero_coef": 0
+    },
+    {
+      "method": "欠采样 (n_runs=3)",
+      "n_train": 7348,
+      "C": 1.0,
+      "precision": 0.02823559790986023,
+      "precision_std": 0.0003626805354247443,
+      "recall": 0.9557007988380537,
+      "recall_std": 0.003888254273592122,
+      "f1": 0.05485023124457922,
+      "f1_std": 0.0006782021434327717,
+      "auc": 0.9857211001823094,
+      "auc_std": 8.764998825985713e-05,
+      "train_score": 0.9623933950281255,
+      "train_score_std": 0.001664301971315946,
+      "raw_runs": [
+        {
+          "method": "欠采样 run-1",
+          "precision": 0.028375987225411074,
+          "recall": 0.9549745824255628,
+          "f1": 0.05511431505270437,
+          "auc": 0.9856123542754616,
+          "train_score": 0.9601252041371802,
+          "n_train": 7348,
+          "C": 1.0,
+          "n_zero_coef": 1
+        },
+        {
+          "method": "欠采样 run-2",
+          "precision": 0.027738175109023818,
+          "recall": 0.9607843137254902,
+          "f1": 0.05391967069467936,
+          "auc": 0.9857239510388154,
+          "train_score": 0.9640718562874252,
+          "n_train": 7348,
+          "C": 1.0,
+          "n_zero_coef": 0
+        },
+        {
+          "method": "欠采样 run-3",
+          "precision": 0.028592631395145802,
+          "recall": 0.9513435003631082,
+          "f1": 0.05551670798635391,
+          "auc": 0.9858269952326512,
+          "train_score": 0.9629831246597713,
+          "n_train": 7348,
+          "C": 1.0,
+          "n_zero_coef": 1
+        }
+      ]
+    }
+  ]
+}

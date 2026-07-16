@@ -2,40 +2,40 @@
 
 ## 1. 数据说明
 
-- 输入：`output/selected_features.parquet`（Part4 输出）
-- 全量样本：4,686,904 行 × 29 列
-- 特征列：25 列
-- ID 列：user_id
-- 原始目标变量：buy_path_type（0=没买，1/2/3/4=不同购买路径）
+- 输入：
+  - `output/processed_features.parquet`（Part4 输出，4,686,904 行 × 47 列）
+  - `output/label_table.parquet`（标签表，4,683,196 行，含 label 列）
+- 两者通过 `(user_id, item_id)` 合并，得到全量样本表
+- 用于训练的特征列：26 列（排除 user_id、label、buy_path_type、last_time、is_power_user 等非数值/ID 列）
+- 目标变量：label（0=未购买，1=购买）
 
 ## 2. 目标变量定义
 
-由于原始数据时间跨度为 30 天（2025-11-18 ~ 2025-12-18），
-且未提供数据截止日期之后的购买记录，本阶段将目标变量定义为：
+标签来自 `label_table.parquet`，定义如下：
 
-> **label = 0**：用户-商品对未产生购买行为（`buy_path_type = 0`）— 负样本  
-> **label = 1**：用户-商品对产生了购买行为（`buy_path_type > 0`）— 正样本
+> **label = 0**：用户在该时间窗口内未购买该商品 — 负样本  
+> **label = 1**：用户在该时间窗口内购买了该商品 — 正样本
 
-- 全量正样本：102,996（2.20%）
-- 全量负样本：4,583,908（97.80%）
-- 正负样本比例 ≈ 1:44.5
+- 全量正样本：5,687（0.12%）
+- 全量负样本：4,677,509（99.88%）
+- 正负样本比例 ≈ 1:822
 
-## 3. 数据集划分（7:2:1 分层抽样）
+## 3. 数据集划分（时间划分）
 
-| 数据集 | 样本数 | 占比 | 正样本占比 | 文件 |
-| --- | --- | --- | --- | --- |
-| 训练集 | 3,280,832 | 70% | 2.20% | `output/train.parquet` |
-| 验证集 | 937,381 | 20% | 2.20% | `output/val.parquet` |
-| 测试集 | 468,691 | 10% | 2.20% | `output/test.parquet` |
+| 数据集 | 时间范围 | 样本数 | 正样本数 | 正样本占比 | 文件 |
+| --- | --- | --- | --- | --- | --- |
+| 训练集 | ≤ 12.10 | 3,285,998 | 3,674 | 0.11% | `output/train.parquet` |
+| 验证集 | 12.11 ~ 12.15 | 914,946 | 1,377 | 0.15% | `output/val.parquet` |
+| 测试集 | ≥ 12.16 | 482,252 | 636 | 0.13% | `output/test.parquet` |
 
 **划分策略：**
-- 第一刀：全量 → train (70%) + temp (30%)，按 label 分层
-- 第二刀：temp → val (66.67% of temp) + test (33.33% of temp)
-- 所有划分使用 `random_state=42` 保证可复现
+- 按时间排序后切分，训练集用最早 23 天数据，验证集用中间 5 天，测试集用最后 3 天
+- 时间划分确保训练时看不到未来数据，杜绝数据泄露
+- 三类数据集正样本占比不完全一致（0.11% / 0.15% / 0.13%），这反映的是不同时间段的真实购买行为差异，不是 bug
 
 ## 4. 类别不平衡处理
 
-由于正负样本严重不均衡（正样本占比约 2%），
+由于正负样本严重不均衡（训练集正样本占比仅 0.11%），
 直接训练会导致模型偏向多数类（预测能力差）。
 本阶段对训练集采用三种处理方案，验证集和测试集保持原始分布。
 
@@ -50,8 +50,12 @@
 
 - 原理：从负样本中随机抽样，保留与正样本相同数量的负样本
 - 优点：简单直接，数据量小训练快
-- 缺点：丢弃大量负样本信息，可能丢失有价值模式
-- 输出：`output/train_undersample.parquet`
+- 缺点：丢弃大量负样本信息，可能丢失有价值模式；随机性大，单次结论不可靠
+- **跑 3 次**（random_state=42/100/2024）取平均，避免单次随机抽样的偶然性
+- 输出：
+  - `output/train_undersample_rs42.parquet`
+  - `output/train_undersample_rs100.parquet`
+  - `output/train_undersample_rs2024.parquet`
 
 ### 4.3 类别权重
 
@@ -62,21 +66,27 @@
 
 ## 5. 三种方案对比（验证集）
 
-用 L1 逻辑回归（C=0.1, solver=saga）在验证集上评估各方案效果：
+用 L1 逻辑回归（C=1.0, solver=saga）在验证集上评估各方案效果：
 
-| 方案 | Precision | Recall | F1 | AUC | TrainAcc |
-| --- | --- | --- | --- | --- | --- |
-| SMOTE 过采样 | 0.3426 | 0.9470 | 0.5032 | 0.9906 | 0.9549 |
-| 类别权重 | 0.3387 | 0.9486 | 0.4992 | 0.9905 | 0.9578 |
-| 欠采样 | 0.3378 | 0.9489 | 0.4983 | 0.9905 | 0.9531 |
+| 方案 | Precision | Recall | F1 | AUC | TrainAcc | n_train |
+| --- | --- | --- | --- | --- | --- | --- |
+| SMOTE 过采样 | 0.0293 | 0.9513 | 0.0568 | 0.9860 | 0.9612 | 6,564,648 |
+| 类别权重 | 0.0289 | 0.9484 | 0.0561 | 0.9867 | 0.9610 | 3,285,998 |
+| 欠采样 (n_runs=3) | 0.0282 | 0.9557 | 0.0549 | 0.9857 | 0.9624 | 7,348 |
 
-**推荐方案：SMOTE 过采样**
-（F1=0.5032，AUC=0.9906）
+**推荐方案：类别权重**
+
+> 三种方案 F1 差距极小（0.0549 ~ 0.0568，相差不到 4%），统计上无显著差异。
+> 推荐类别权重的理由：
+> 1. 不改动原始数据，保留全部真实样本，可解释性和可复现性最好
+> 2. 不做数据合成或删减，训练成本最低
+>
+> 模型瓶颈不在不平衡处理方法上，而在于正样本绝对数量太少（训练集仅 3,674 个正样本）。
 
 **评估指标说明：**
 - Precision（精确率）：预测为正的样本中有多少真的是正
 - Recall（召回率）：真正的正样本有多少被找出来
-- F1：Precision 和 Recall 的调和平均
+- F1：Precision 和 Recall 的调和平均（不平衡场景首选指标）
 - AUC：模型排序能力（越接近 1 越好）
 - 验证集保持原始不平衡分布，未参与任何处理
 
@@ -84,16 +94,21 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `output/train.parquet` | 原始训练集（70%） |
-| `output/val.parquet` | 验证集（20%） |
-| `output/test.parquet` | 测试集（10%） |
-| `output/train_smote.parquet` | SMOTE 过采样训练集 |
-| `output/train_undersample.parquet` | 欠采样训练集 |
+| `output/train.parquet` | 训练集（时间 ≤ 12.10，3,285,998 行） |
+| `output/val.parquet` | 验证集（12.11 ~ 12.15，914,946 行） |
+| `output/test.parquet` | 测试集（≥ 12.16，482,252 行） |
+| `output/train_smote.parquet` | SMOTE 过采样训练集（6,564,648 行，正负 1:1） |
+| `output/train_undersample_rs42.parquet` | 欠采样训练集 seed=42（7,348 行） |
+| `output/train_undersample_rs100.parquet` | 欠采样训练集 seed=100（7,348 行） |
+| `output/train_undersample_rs2024.parquet` | 欠采样训练集 seed=2024（7,348 行） |
+| `output/imbalance_comparison.json` | 对比实验详细结果（含欠采样各 run 指标） |
+| `docs/Part5_不平衡处理对比.md` | 对比报告 |
 | `docs/Part5_样本构建说明文档.md` | 本文档 |
 
 | 代码文件 | 说明 |
 | --- | --- |
-| `src/build_samples.py` | 主入口脚本 |
-| `src/sample_construction/builder.py` | 样本构建与划分 |
-| `src/sample_construction/imbalance.py` | 三种不平衡处理 |
-| `src/sample_construction/compare.py` | 三种方案对比评估 |
+| `src/build_samples.py` | 样本构建与时间划分 |
+| `src/build_labels.py` | 标签构建 |
+| `src/run_imbalance_comparison.py` | 统一运行入口（串联全部步骤） |
+| `src/sample_construction/imbalance.py` | 三种不平衡处理方案 |
+| `src/sample_construction/compare.py` | 三种方案对比评估（含多次欠采样） |
