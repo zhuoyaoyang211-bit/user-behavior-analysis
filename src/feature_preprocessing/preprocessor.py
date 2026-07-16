@@ -1,14 +1,14 @@
 """特征预处理核心逻辑。
 
 5 步处理流程：
-    1. 删除 3 列冗余特征（item_id / first_active_time / last_active_time）
+    1. 删除 2 列冗余 datetime（first_active_time / last_active_time）
     2. 填充 3 列缺失值（填 0 或中位数）
     3. 目标编码 2 列高维类别（item_category / user_id → 购买率）
     4. 标准化 42 列数值（StandardScaler 均值 0 方差 1）
-    5. 保留 4 列不动（is_power_user / buy_path_type / 原始主键）
+    5. 保留 5 列不动（is_power_user / buy_path_type / 原始主键 user_id+item_id）
 
 输入：output/feature_wide_table.parquet（4,686,904 行 × 47 列）
-输出：output/processed_features.parquet（4,686,904 行 × 46 列）
+输出：output/processed_features.parquet（4,686,904 行 × 47 列）
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from sklearn.preprocessing import StandardScaler
 
 # ── 第①步：要删除的列 ──────────────────────────────────────────
 DROP_COLUMNS: list[str] = [
-    "item_id",             # 287 万种商品编号，无信息量，商品信息已被 10 列覆盖
+    # "item_id" 已移除：用户-商品对是主键，删除会丢失样本标识
     "first_active_time",   # datetime，信息已被 active_days 覆盖
     "last_active_time",    # datetime，信息已被 rfm_r_score 覆盖
 ]
@@ -39,6 +39,7 @@ FILL_STRATEGY: dict[str, str | float] = {
 # 这些列保持原值，不做 StandardScaler
 COLUMNS_NO_SCALE: list[str] = [
     "user_id",           # 原始主键，保留做关联，不参与建模
+    "item_id",           # 原始主键，保留做关联，不参与建模
     "item_category",     # 原始类别列，保留做关联，不参与建模
     "is_power_user",     # 0/1 二值，标准化破坏语义
     "buy_path_type",     # 目标变量，预处理阶段绝对不能动
@@ -46,7 +47,7 @@ COLUMNS_NO_SCALE: list[str] = [
 
 
 def drop_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """删除 3 列冗余特征。
+    """删除 2 列冗余特征。
 
     Args:
         df: 原始特征宽表。
@@ -126,7 +127,7 @@ def target_encode(df: pd.DataFrame) -> pd.DataFrame:
 def standardize(df: pd.DataFrame) -> pd.DataFrame:
     """对数值列做 StandardScaler 标准化（均值 0 方差 1）。
 
-    排除 COLUMNS_NO_SCALE 中的 4 列，其余数值列全部标准化。
+    排除 COLUMNS_NO_SCALE 中的 5 列，其余数值列全部标准化。
 
     Args:
         df: 目标编码后的 DataFrame。
@@ -158,10 +159,10 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
         df: Part3 产出的特征宽表（4,686,904 行 × 47 列）。
 
     Returns:
-        预处理后的 DataFrame（4,686,904 行 × 46 列），
+        预处理后的 DataFrame（4,686,904 行 × 47 列），
         全数值、无缺失、无 datetime，可直接喂给特征筛选。
     """
-    # ① 删除 3 列冗余特征
+    # ① 删除 2 列冗余特征
     df = drop_columns(df)
     gc.collect()
 
@@ -174,7 +175,7 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     # ④ 标准化 42 列数值
     df = standardize(df)
 
-    # ⑤ 4 列不动（is_power_user / buy_path_type / 原始主键）
+    # ⑤ 5 列不动（is_power_user / buy_path_type / 原始主键 user_id+item_id）
     #    无需额外操作，已在 COLUMNS_NO_SCALE 中排除
 
     return df

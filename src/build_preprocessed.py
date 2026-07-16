@@ -1,9 +1,9 @@
 """特征预处理主入口。
 
 输入：Part3 feature_wide_table.parquet（4,686,904 行 × 47 列）
-输出：output/processed_features.parquet（4,686,904 行 × 46 列）
+输出：output/processed_features.parquet（4,686,904 行 × 47 列）
 
-处理流程：删 3 列 → 填缺失 → 目标编码 2 列 → 标准化 42 列 → 保留 4 列不动
+处理流程：删 2 列 → 填缺失 → 目标编码 2 列 → 标准化 42 列 → 保留 5 列不动
 """
 
 from __future__ import annotations

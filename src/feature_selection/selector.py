@@ -19,7 +19,7 @@ from common.logger import get_logger
 logger = get_logger(__name__)
 
 # 不参与特征筛选的列
-EXCLUDE_COLS = {"user_id", "item_category", "buy_path_type"}
+EXCLUDE_COLS = {"user_id", "item_id", "item_category", "buy_path_type"}
 
 # 方差阈值：标准化后方差 < 此值视为伪常数
 VARIANCE_THRESHOLD = 0.01
@@ -214,7 +214,7 @@ def select_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     cols_final, dropped_corr_pairs = _correlation_filter(df, cols_mi, mi_series)
 
     # 构建输出
-    output_cols = ["user_id"] + cols_final + ["buy_path_type"]
+    output_cols = ["user_id", "item_id"] + cols_final + ["buy_path_type"]
     selected_df = df[output_cols].copy()
 
     summary = {

@@ -1,6 +1,6 @@
 """特征筛选主入口。
 
-输入：output/processed_features.parquet（Part4，4,686,904 行 × 46 列）
+输入：output/processed_features.parquet（Part4，4,686,904 行 × 47 列）
 输出：output/selected_features.parquet（筛选后的特征集）
 
 筛选流程：
