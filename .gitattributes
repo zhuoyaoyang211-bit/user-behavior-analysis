@@ -1,3 +1,4 @@
 *.csv filter=lfs diff=lfs merge=lfs -text
 *.parquet filter=lfs diff=lfs merge=lfs -text
 output/train_smote.parquet filter=lfs diff=lfs merge=lfs -text
+output/processed_features.parquet filter=lfs diff=lfs merge=lfs -text

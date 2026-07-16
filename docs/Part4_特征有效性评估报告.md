@@ -15,11 +15,11 @@
 | 项目 | 说明 |
 | --- | --- |
 | 输入文件 | `output/processed_features.parquet` |
-| 输入规模 | 4,686,904 行 × 46 列 |
+| 输入规模 | 4,686,904 行 × 47 列 |
 | 目标变量 | `buy_path_type`：0=未购买，1/2/3/4=四种不同购买路径 |
-| 候选特征 | 43 列数值特征（排除 `user_id`、`item_category`、`buy_path_type`） |
+| 候选特征 | 43 列数值特征（排除 `user_id`、`item_id`、`item_category`、`buy_path_type`） |
 | 输出文件 | `output/selected_features.parquet` |
-| 输出规模 | 4,686,904 行 × 27 列 |
+| 输出规模 | 4,686,904 行 × 28 列 |
 
 ## 3. 评估方法
 
@@ -93,7 +93,7 @@ user_item_svd_score
 删除总计：18 列（互信息 11 列 + 相关性 7 列）
 ```
 
-最终输出在保留 `user_id` 和 `buy_path_type` 后，共 27 列。
+最终输出在保留 `user_id`、`item_id` 和 `buy_path_type` 后，共 28 列。
 
 ## 5. 特征重要性预评估（L1 逻辑回归）
 
@@ -194,7 +194,7 @@ item_category_te
 
 | 文件 | 说明 |
 | --- | --- |
-| `output/selected_features.parquet` | 筛选后的核心特征数据集（4,686,904 行 × 27 列） |
+| `output/selected_features.parquet` | 筛选后的核心特征数据集（4,686,904 行 × 28 列） |
 | `output/mi_scores.csv` | 各特征互信息分数（中间参考文件，非大纲强制产出物） |
 | `docs/Part4_特征有效性评估报告.md` | 本评估报告 |
 
