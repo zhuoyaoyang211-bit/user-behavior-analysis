@@ -1,18 +1,20 @@
-"""样本构建主入口 — 时间窗口版。
+"""样本构建主入口 — 时间特征分层窗口版。
 
 流程：
-    1. 合并特征宽表 + 标签表 → 全量样本
-    2. 预处理：删冗余列 → 填缺失 → 目标编码 → 标准化
-    3. 特征筛选：方差阈值 → 互信息 → 相关性分析
-    4. 按 last_time 时间窗口划分 train/val/test
+    1. 合并已筛选核心特征 + 标签表 → 全量样本
+    2. 按 last_time 时间特征分层后，层内按时间窗口划分 train/val/test
 
-划分方案（按 last_time 日期切分）：
-    train: ≤ 2025-12-10 (~70%)
-    val:   2025-12-11 ~ 2025-12-15 (~20%)
-    test:  ≥ 2025-12-16 (~10%)
+划分方案（只使用时间维度，不按 label 随机保分布）：
+    1. 按 日期 × 工作日/周末/特殊日 × 小时段 构造时间小层
+    2. 每个时间小层内按 last_time 排序
+    3. 层内按 7:2:1 连续切分 train/val/test
+
+说明：
+    selected_features.parquet 已是核心特征数据集，本脚本不再重复填缺失、
+    目标编码、标准化或特征筛选，只负责合并标签、按时间维度划分和保存样本。
 
 输入：
-    output/feature_wide_table.parquet（4,686,904 行 × 47 列）
+    output/selected_features.parquet（4,686,904 行 × 28 列）
     output/label_table.parquet（4,683,196 行 × 4 列）
 
 输出：
@@ -29,60 +31,44 @@ import sys
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from common.logger import get_logger
 from config import get_config
-from feature_selection.selector import (
-    _correlation_filter,
-    _get_feature_cols,
-    _mutual_info_filter,
-    _variance_filter,
-)
 
 logger = get_logger(__name__)
 
 _cfg = get_config()
 OUTPUT_DIR = str(_cfg.project_root / "output")
-WIDE_TABLE_PATH = os.path.join(OUTPUT_DIR, "feature_wide_table.parquet")
+SELECTED_FEATURES_PATH = os.path.join(OUTPUT_DIR, "selected_features.parquet")
 LABEL_TABLE_PATH = os.path.join(OUTPUT_DIR, "label_table.parquet")
 
-# ── 时间窗口切分点 ─────────────────────────────────────────────
-TRAIN_CUTOFF = pd.Timestamp("2025-12-11")   # train: last_time < 12.11 (即 ≤ 12.10)
-VAL_CUTOFF = pd.Timestamp("2025-12-16")     # val:   12.11 ≤ last_time < 12.16 (即 12.11-12.15)
-                                             # test:  last_time ≥ 12.16
+# ── 时间特征分层窗口划分参数 ───────────────────────────────────
+TRAIN_RATIO = 0.7
+VAL_RATIO = 0.2
+TEST_RATIO = 0.1
+assert abs(TRAIN_RATIO + VAL_RATIO + TEST_RATIO - 1.0) < 1e-9
 
-# ── 不参与标准化的列 ───────────────────────────────────────────
-COLUMNS_NO_SCALE = {
-    "user_id", "item_id", "item_category",
-    "is_power_user", "label", "last_time",
-}
-
-# ── 缺失值填充策略 ─────────────────────────────────────────────
-FILL_STRATEGY: dict[str, str | float] = {
-    "item_decay_slope": 0,
-    "user_category_pref_score": 0,
-    "user_avg_interval_hours": "median",
-}
-
-# ── 特征筛选：不参与筛选的列 ──────────────────────────────────
-EXCLUDE_COLS = {"user_id", "item_id", "item_category", "label", "last_time"}
-
+# 可按业务补充，例如电商大促日。这里把 12.12 单独作为特殊日分层。
+SPECIAL_DATES = {pd.Timestamp("2025-12-12").date()}
 
 # ===========================================================================
-# 步骤 1：合并特征宽表 + 标签表
+# 步骤 1：合并已筛选核心特征 + 标签表
 # ===========================================================================
 def merge_features_and_labels() -> pd.DataFrame:
-    """加载特征宽表和标签表，inner join 合并。
+    """加载已筛选核心特征和标签表，inner join 合并。
 
     Returns:
         合并后的 DataFrame，含特征 + label + last_time。
     """
-    logger.info("加载特征宽表 ...")
-    wide = pd.read_parquet(WIDE_TABLE_PATH)
-    logger.info("  特征宽表: %s 行 × %s 列", f"{len(wide):,}", len(wide.columns))
+    logger.info("加载已筛选核心特征 ...")
+    features = pd.read_parquet(SELECTED_FEATURES_PATH)
+    logger.info("  核心特征: %s 行 × %s 列", f"{len(features):,}", len(features.columns))
+
+    if "buy_path_type" in features.columns:
+        features = features.drop(columns=["buy_path_type"])
+        logger.info("  删除旧目标列: buy_path_type")
 
     logger.info("加载标签表 ...")
     labels = pd.read_parquet(LABEL_TABLE_PATH)
@@ -91,205 +77,171 @@ def merge_features_and_labels() -> pd.DataFrame:
                 f"{labels['label'].sum():,}",
                 labels["label"].mean() * 100)
 
-    logger.info("合并特征宽表 + 标签表 (inner join) ...")
-    df = wide.merge(labels, on=["user_id", "item_id"], how="inner")
+    logger.info("合并核心特征 + 标签表 (inner join) ...")
+    df = features.merge(labels, on=["user_id", "item_id"], how="inner")
     logger.info("  合并后: %s 行 × %s 列", f"{len(df):,}", len(df.columns))
 
     # 释放原始大表
-    del wide, labels
+    del features, labels
     gc.collect()
 
     return df
 
 
 # ===========================================================================
-# 步骤 2：预处理
+# 步骤 2：时间特征分层窗口划分
 # ===========================================================================
-def drop_redundant(df: pd.DataFrame) -> pd.DataFrame:
-    """删除冗余列。
-
-    - buy_path_type：已被新 label 替代
-    - first_active_time / last_active_time：datetime 列，信息已被其他特征覆盖
-    """
-    drop_cols = ["buy_path_type", "first_active_time", "last_active_time"]
-    existing = [c for c in drop_cols if c in df.columns]
-    df = df.drop(columns=existing)
-    logger.info("  删除冗余列: %s", existing)
+def ensure_last_time_datetime(df: pd.DataFrame) -> pd.DataFrame:
+    """确保 last_time 是 datetime 类型。"""
+    if not pd.api.types.is_datetime64_any_dtype(df["last_time"]):
+        df = df.copy()
+        df["last_time"] = pd.to_datetime(df["last_time"])
     return df
 
 
-def fill_missing(df: pd.DataFrame) -> pd.DataFrame:
-    """填充缺失值。"""
-    for col, strategy in FILL_STRATEGY.items():
-        if col not in df.columns:
-            continue
-        n_miss = df[col].isnull().sum()
-        if n_miss == 0:
-            continue
-        if strategy == "median":
-            df[col] = df[col].fillna(df[col].median())
-        else:
-            df[col] = df[col].fillna(strategy)
-        logger.info("  填充 %s: %s 个缺失值 → %s", col, f"{n_miss:,}", strategy)
-    return df
+def build_time_strata(df: pd.DataFrame) -> pd.Series:
+    """构造时间小层：日期 × 工作日/周末/特殊日 × 小时段。"""
+    dt = df["last_time"]
+    dates = dt.dt.date
 
-
-def target_encode(df: pd.DataFrame) -> pd.DataFrame:
-    """目标编码：用新 label 算类目/用户的购买率。
-
-    生成 2 列：
-    - item_category_te：该类目下 label=1 的比例
-    - user_id_te：该用户 label=1 的比例
-    """
-    target = df["label"]
-
-    # 类目级别购买率
-    cat_rate = (
-        pd.DataFrame({"cat": df["item_category"], "y": target})
-        .groupby("cat")["y"]
-        .mean()
+    day_type = np.select(
+        [
+            dates.isin(SPECIAL_DATES),
+            dt.dt.dayofweek >= 5,
+        ],
+        [
+            "special",
+            "weekend",
+        ],
+        default="weekday",
     )
-    df["item_category_te"] = df["item_category"].map(cat_rate).astype(np.float32)
-    logger.info("  目标编码 item_category → item_category_te (%d 个类目)", len(cat_rate))
-
-    # 用户级别购买率
-    user_rate = (
-        pd.DataFrame({"uid": df["user_id"], "y": target})
-        .groupby("uid")["y"]
-        .mean()
-    )
-    df["user_id_te"] = df["user_id"].map(user_rate).astype(np.float32)
-    logger.info("  目标编码 user_id → user_id_te (%d 个用户)", len(user_rate))
-
-    return df
-
-
-def standardize(df: pd.DataFrame) -> pd.DataFrame:
-    """StandardScaler 标准化数值列。
-
-    排除 COLUMNS_NO_SCALE 中的列，其余数值列全部标准化。
-    """
-    scale_cols = [
-        c for c in df.columns
-        if c not in COLUMNS_NO_SCALE
-        and pd.api.types.is_numeric_dtype(df[c])
-    ]
-    logger.info("  待标准化: %d 列", len(scale_cols))
-
-    scaler = StandardScaler()
-    df[scale_cols] = scaler.fit_transform(df[scale_cols].astype(np.float64))
-    # 降回 float32 省内存
-    for c in scale_cols:
-        df[c] = df[c].astype(np.float32)
-
-    return df
-
-
-def preprocess(df: pd.DataFrame) -> pd.DataFrame:
-    """预处理主流程：删冗余 → 填缺失 → 目标编码 → 标准化。"""
-    logger.info("开始预处理 ...")
-
-    df = drop_redundant(df)
-    df = fill_missing(df)
-    df = target_encode(df)
-    df = standardize(df)
-
-    logger.info("预处理完成: %s 行 × %s 列", f"{len(df):,}", len(df.columns))
-    return df
-
-
-# ===========================================================================
-# 步骤 3：特征筛选
-# ===========================================================================
-def select_features(df: pd.DataFrame) -> pd.DataFrame:
-    """三轮特征筛选（方差 → 互信息 → 相关性）。
-
-    Args:
-        df: 预处理后的 DataFrame。
-
-    Returns:
-        筛选后的 DataFrame。
-    """
-    logger.info("开始特征筛选 ...")
-
-    feature_cols = [c for c in df.columns if c not in EXCLUDE_COLS]
-    logger.info("  参与筛选的特征列: %d 列", len(feature_cols))
-
-    # 第 1 轮：方差阈值
-    cols_vt, dropped_vt = _variance_filter(df, feature_cols)
-    logger.info("  方差筛选: %d → %d 列", len(feature_cols), len(cols_vt))
-
-    # 第 2 轮：互信息（用 label 作为目标）
-    cols_mi, dropped_mi, mi_series = _mutual_info_filter(
-        df, cols_vt, target_col="label"
-    )
-    logger.info("  互信息筛选: %d → %d 列", len(cols_vt), len(cols_mi))
-
-    # 第 3 轮：相关性
-    cols_final, dropped_corr = _correlation_filter(df, cols_mi, mi_series)
-    logger.info("  相关性筛选: %d → %d 列", len(cols_mi), len(cols_final))
-
-    # 构建输出
-    output_cols = ["user_id", "item_id"] + cols_final + ["label", "last_time"]
-    selected_df = df[output_cols].copy()
-
-    logger.info(
-        "特征筛选完成: %d → %d 列",
-        len(feature_cols),
-        len(cols_final),
+    hour_bin = pd.cut(
+        dt.dt.hour,
+        bins=[-1, 5, 11, 17, 23],
+        labels=["night", "morning", "afternoon", "evening"],
     )
 
-    # 打印 Top 10 互信息
-    print("\n  [互信息 Top 10（新 label）]")
-    for i, (col, score) in enumerate(mi_series.head(10).items(), 1):
-        marker = "*" if col in cols_final else "x"
-        print(f"    {i:2d}. [{marker}] {col:<35s} MI={score:.6f}")
+    return (
+        dates.astype(str)
+        + "|"
+        + pd.Series(day_type, index=df.index).astype(str)
+        + "|"
+        + hour_bin.astype(str)
+    )
 
-    return selected_df
+
+def split_ordered_group(
+    group: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """单个时间小层内按 last_time 顺序连续切分。"""
+    group = group.sort_values("last_time")
+    n = len(group)
+
+    if n == 1:
+        return group, group.iloc[0:0], group.iloc[0:0]
+    if n == 2:
+        return group.iloc[:1], group.iloc[1:], group.iloc[0:0]
+
+    test_n = max(1, int(round(n * TEST_RATIO)))
+    val_n = max(1, int(round(n * VAL_RATIO)))
+    if val_n + test_n >= n:
+        val_n = 1
+        test_n = 1
+
+    train_n = n - val_n - test_n
+    val_end = train_n + val_n
+
+    return group.iloc[:train_n], group.iloc[train_n:val_end], group.iloc[val_end:]
 
 
-# ===========================================================================
-# 步骤 4：时间窗口划分
-# ===========================================================================
 def split_by_time(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """按 last_time 时间窗口划分 train/val/test。
+    """按时间特征分层后，在每个小层内按时间顺序切分 train/val/test。
 
     Returns:
         (train_df, val_df, test_df)
     """
-    logger.info("开始时间窗口划分 ...")
+    logger.info("开始时间特征分层窗口划分 ...")
 
-    # 确保 last_time 是 datetime
-    if not pd.api.types.is_datetime64_any_dtype(df["last_time"]):
-        df["last_time"] = pd.to_datetime(df["last_time"])
+    df = ensure_last_time_datetime(df).copy()
+    df["_time_stratum"] = build_time_strata(df)
 
-    train = df[df["last_time"] < TRAIN_CUTOFF].copy()
-    val = df[
-        (df["last_time"] >= TRAIN_CUTOFF) & (df["last_time"] < VAL_CUTOFF)
-    ].copy()
-    test = df[df["last_time"] >= VAL_CUTOFF].copy()
+    train_parts: list[pd.DataFrame] = []
+    val_parts: list[pd.DataFrame] = []
+    test_parts: list[pd.DataFrame] = []
+
+    for _, group in df.groupby("_time_stratum", sort=False):
+        train_part, val_part, test_part = split_ordered_group(group)
+        train_parts.append(train_part)
+        val_parts.append(val_part)
+        test_parts.append(test_part)
+
+    train = pd.concat(train_parts, ignore_index=True)
+    val = pd.concat(val_parts, ignore_index=True)
+    test = pd.concat(test_parts, ignore_index=True)
+
+    for partial in (train, val, test):
+        partial.drop(columns=["_time_stratum"], inplace=True)
 
     total = len(df)
     logger.info(
-        "  train: %s 行 (%5.1f%%)  last_time ≤ 12.10",
+        "  train: %s 行 (%5.1f%%)",
         f"{len(train):,}",
         len(train) / total * 100,
     )
     logger.info(
-        "  val:   %s 行 (%5.1f%%)  last_time 12.11-12.15",
+        "  val:   %s 行 (%5.1f%%)",
         f"{len(val):,}",
         len(val) / total * 100,
     )
     logger.info(
-        "  test:  %s 行 (%5.1f%%)  last_time ≥ 12.16",
+        "  test:  %s 行 (%5.1f%%)",
         f"{len(test):,}",
         len(test) / total * 100,
     )
 
     # 验证无重叠、无遗漏
     assert len(train) + len(val) + len(test) == total, "划分有遗漏！"
+    log_split_quality(train, val, test)
 
     return train, val, test
+
+
+def log_split_quality(
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    test: pd.DataFrame,
+) -> None:
+    """打印各集合的时间范围、标签分布和时间类型覆盖。"""
+    logger.info("划分质量检查")
+    total = len(train) + len(val) + len(test)
+
+    for name, partial in [("train", train), ("val", val), ("test", test)]:
+        dt = partial["last_time"]
+        dates = dt.dt.date
+        day_type = np.select(
+            [
+                dates.isin(SPECIAL_DATES),
+                dt.dt.dayofweek >= 5,
+            ],
+            [
+                "special",
+                "weekend",
+            ],
+            default="weekday",
+        )
+        day_type_counts = pd.Series(day_type).value_counts().to_dict()
+        logger.info(
+            "  %-5s rows=%s (%5.1f%%), pos=%.4f%%, weekday_rows=%s, weekend_rows=%s, special_rows=%s, range=%s ~ %s",
+            name,
+            f"{len(partial):,}",
+            len(partial) / total * 100,
+            partial["label"].mean() * 100,
+            f"{day_type_counts.get('weekday', 0):,}",
+            f"{day_type_counts.get('weekend', 0):,}",
+            f"{day_type_counts.get('special', 0):,}",
+            str(dt.min())[:16],
+            str(dt.max())[:16],
+        )
 
 
 # ===========================================================================
@@ -300,18 +252,12 @@ def main() -> None:
     # 1. 合并
     df = merge_features_and_labels()
 
-    # 2. 预处理
-    df = preprocess(df)
-    gc.collect()
-
-    # 3. 特征筛选
-    df = select_features(df)
-    gc.collect()
-
-    # 4. 时间窗口划分
+    # 2. 时间特征分层窗口划分
     train, val, test = split_by_time(df)
+    del df
+    gc.collect()
 
-    # 5. 保存
+    # 3. 保存
     train_path = os.path.join(OUTPUT_DIR, "train.parquet")
     val_path = os.path.join(OUTPUT_DIR, "val.parquet")
     test_path = os.path.join(OUTPUT_DIR, "test.parquet")
@@ -324,13 +270,14 @@ def main() -> None:
     val_mb = os.path.getsize(val_path) / 1024 / 1024
     test_mb = os.path.getsize(test_path) / 1024 / 1024
 
-    # 6. 打印摘要
+    # 4. 打印摘要
     print("\n" + "=" * 65)
-    print("样本构建完成（时间窗口版）")
+    print("样本构建完成（时间特征分层窗口版）")
     print("=" * 65)
-    print(f"\n  划分方案: last_time ≤ 12.10 | 12.11-12.15 | ≥ 12.16")
+    print("\n  划分方案: 日期 × 工作日/周末/特殊日 × 小时段分层，层内按 last_time 顺序 7:2:1 切分")
     print(f"\n  {'':>8} {'行数':>12} {'占比':>8} {'正样本':>8} {'正样本率':>10} {'文件大小':>10}")
     print(f"  {'-' * 56}")
+    total = len(train) + len(val) + len(test)
     for name, d, path, mb in [
         ("train", train, train_path, train_mb),
         ("val", val, val_path, val_mb),
@@ -338,7 +285,7 @@ def main() -> None:
     ]:
         n_pos = d["label"].sum()
         print(
-            f"  {name:>8} {len(d):>12,} {len(d)/len(df)*100:>7.1f}% "
+            f"  {name:>8} {len(d):>12,} {len(d)/total*100:>7.1f}% "
             f"{n_pos:>8,} {n_pos/len(d)*100:>9.2f}% {mb:>9.1f} MB"
         )
     print(f"\n  总特征列数: {len([c for c in train.columns if c not in ('user_id','item_id','label','last_time')])}")
