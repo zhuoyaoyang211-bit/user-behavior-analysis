@@ -1,4 +1,8 @@
-"""Train controlled baseline classifiers and export comparison artifacts."""
+"""Train controlled baseline classifiers and export comparison artifacts.
+
+Model comparison is performed on an internal split sampled from train.parquet.
+The untouched val.parquet is used only for final reporting.
+"""
 
 from __future__ import annotations
 
@@ -25,78 +29,56 @@ from sklearn.metrics import (
 )
 from xgboost import XGBClassifier
 
+from traditional_ml_split import (
+    numeric_feature_columns,
+    sample_by_label_time_strata,
+    smote_to_ratio,
+    split_within_time_strata,
+    to_xy,
+)
+
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_TRAIN_PATH = PROJECT_DIR / "output" / "train_smote_r10.parquet"
+DEFAULT_TRAIN_PATH = PROJECT_DIR / "output" / "train.parquet"
+DEFAULT_FINAL_TRAIN_PATH = PROJECT_DIR / "output" / "train_smote_r10.parquet"
 DEFAULT_VAL_PATH = PROJECT_DIR / "output" / "val.parquet"
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "output" / "baseline_models"
 TARGET_COL = "label"
-EXCLUDE_COLS = {
-    TARGET_COL,
-    "user_id",
-    "item_id",
-    "last_time",
-    "buy_path_type",
-    "behavior_type",
-    "item_category",
-}
 RANDOM_STATE = 42
 THRESHOLD = 0.5
+DEFAULT_THRESHOLDS = [
+    0.05,
+    0.10,
+    0.15,
+    0.20,
+    0.25,
+    0.30,
+    0.35,
+    0.40,
+    0.45,
+    0.50,
+    0.60,
+    0.70,
+    0.80,
+    0.90,
+]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--train-path", type=Path, default=DEFAULT_TRAIN_PATH)
+    parser.add_argument(
+        "--final-train-path",
+        type=Path,
+        default=DEFAULT_FINAL_TRAIN_PATH,
+        help="Full SMOTE r10 training set used after baseline model selection.",
+    )
     parser.add_argument("--val-path", type=Path, default=DEFAULT_VAL_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--selection-sample-size", type=int, default=500_000)
+    parser.add_argument("--selection-val-frac", type=float, default=0.2)
+    parser.add_argument("--smote-ratio", type=float, default=0.10)
     return parser.parse_args()
-
-
-def load_data(train_path: Path, val_path: Path) -> dict[str, Any]:
-    train = pd.read_parquet(train_path)
-    val = pd.read_parquet(val_path)
-
-    if TARGET_COL not in train.columns or TARGET_COL not in val.columns:
-        raise ValueError(f"Both datasets must contain `{TARGET_COL}`.")
-
-    common_cols = [c for c in train.columns if c in val.columns]
-    feature_cols = []
-    dropped_non_numeric = []
-    for col in common_cols:
-        if col in EXCLUDE_COLS:
-            continue
-        if pd.api.types.is_numeric_dtype(train[col]) and pd.api.types.is_numeric_dtype(
-            val[col]
-        ):
-            feature_cols.append(col)
-        else:
-            dropped_non_numeric.append(col)
-
-    if not feature_cols:
-        raise ValueError("No common numeric feature columns found.")
-
-    X_train = train[feature_cols].to_numpy(dtype=np.float32, copy=True)
-    y_train = train[TARGET_COL].to_numpy(dtype=np.int8, copy=True)
-    X_val = val[feature_cols].to_numpy(dtype=np.float32, copy=True)
-    y_val = val[TARGET_COL].to_numpy(dtype=np.int8, copy=True)
-
-    if np.isnan(X_train).any() or np.isnan(X_val).any():
-        raise ValueError("Missing values found. Add a shared imputation step first.")
-
-    return {
-        "X_train": X_train,
-        "y_train": y_train,
-        "X_val": X_val,
-        "y_val": y_val,
-        "feature_cols": feature_cols,
-        "train_shape": train.shape,
-        "val_shape": val.shape,
-        "train_pos_rate": float(y_train.mean()),
-        "val_pos_rate": float(y_val.mean()),
-        "dropped_train_only": sorted(set(train.columns) - set(val.columns)),
-        "dropped_val_only": sorted(set(val.columns) - set(train.columns)),
-        "dropped_non_numeric": dropped_non_numeric,
-    }
 
 
 def build_models() -> dict[str, Any]:
@@ -167,6 +149,26 @@ def predict_positive_probability(model: Any, X: np.ndarray) -> np.ndarray:
     raise TypeError(f"{type(model).__name__} does not support predict_proba().")
 
 
+def best_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    thresholds: list[float] = DEFAULT_THRESHOLDS,
+) -> dict[str, float]:
+    """Select a threshold on internal selection validation only."""
+    rows = []
+    for threshold in thresholds:
+        pred = (y_prob >= threshold).astype(np.int8)
+        rows.append(
+            {
+                "threshold": threshold,
+                "precision": precision_score(y_true, pred, zero_division=0),
+                "recall": recall_score(y_true, pred, zero_division=0),
+                "f1": f1_score(y_true, pred, zero_division=0),
+            }
+        )
+    return max(rows, key=lambda row: (row["f1"], row["precision"]))
+
+
 def feature_effects(
     model_name: str, model: Any, feature_cols: list[str]
 ) -> pd.DataFrame:
@@ -195,44 +197,54 @@ def feature_effects(
 def write_report(
     output_dir: Path,
     setup: dict[str, Any],
+    selection_df: pd.DataFrame,
     metrics_df: pd.DataFrame,
 ) -> None:
-    table_df = metrics_df.copy()
-    for col in table_df.select_dtypes(include=["float"]).columns:
-        table_df[col] = table_df[col].map(lambda x: f"{x:.6f}")
-    markdown_table = table_df.to_csv(index=False, sep="|").replace("|", " | ")
-    table_lines = markdown_table.strip().splitlines()
-    header = f"| {table_lines[0]} |"
-    separator = "| " + " | ".join(["---"] * len(table_df.columns)) + " |"
-    body = [f"| {line} |" for line in table_lines[1:]]
+    def to_markdown_table(df: pd.DataFrame) -> str:
+        table_df = df.copy()
+        for col in table_df.select_dtypes(include=["float"]).columns:
+            table_df[col] = table_df[col].map(lambda x: f"{x:.6f}")
+        markdown_table = table_df.to_csv(index=False, sep="|").replace("|", " | ")
+        table_lines = markdown_table.strip().splitlines()
+        header = f"| {table_lines[0]} |"
+        separator = "| " + " | ".join(["---"] * len(table_df.columns)) + " |"
+        body = [f"| {line} |" for line in table_lines[1:]]
+        return "\n".join([header, separator, *body])
 
     lines = [
         "# Baseline Model Comparison",
         "",
         "## Controlled Setup",
         "",
-        f"- Train: `{setup['train_path']}`",
-        f"- Validation: `{setup['val_path']}`",
+        f"- Raw train for model selection: `{setup['train_path']}`",
+        f"- Final train for refit: `{setup['final_train_path']}`",
+        f"- Final validation: `{setup['val_path']}`",
         f"- Features: {len(setup['feature_cols'])} common numeric columns",
-        f"- Train shape: {tuple(setup['train_shape'])}, positive rate: {setup['train_pos_rate']:.6f}",
-        f"- Validation shape: {tuple(setup['val_shape'])}, positive rate: {setup['val_pos_rate']:.6f}",
+        f"- Raw train shape: {tuple(setup['raw_train_shape'])}",
+        f"- Selection sample shape: {tuple(setup['selection_sample_shape'])}",
+        f"- Selection train shape before SMOTE: {tuple(setup['selection_train_shape'])}, "
+        f"positive rate: {setup['selection_train_pos_rate_before_smote']:.6f}",
+        f"- Selection train positive rate after SMOTE: {setup['selection_train_pos_rate_after_smote']:.6f}",
+        f"- Selection validation shape: {tuple(setup['selection_val_shape'])}, "
+        f"positive rate: {setup['selection_val_pos_rate']:.6f}",
+        f"- Final train shape: {tuple(setup['final_train_shape'])}, positive rate: {setup['final_train_pos_rate']:.6f}",
+        f"- Final validation shape: {tuple(setup['final_val_shape'])}, positive rate: {setup['final_val_pos_rate']:.6f}",
         f"- Random state: {RANDOM_STATE}",
-        f"- Classification threshold: {THRESHOLD}",
-        "- No extra class weights; the same SMOTE r10 training set is used for all models.",
+        f"- Default classification threshold: {THRESHOLD}",
+        "- Model/threshold selection uses only the internal selection validation split.",
+        "- Final validation is used once for reporting and is not used to choose models or thresholds.",
         "",
-        "## Validation Metrics",
+        "## Internal Selection Metrics",
         "",
-        "\n".join([header, separator, *body]),
+        to_markdown_table(selection_df),
+        "",
+        "## Final Validation Metrics",
+        "",
+        to_markdown_table(metrics_df),
         "",
         "## Feature Columns",
         "",
         ", ".join(setup["feature_cols"]),
-        "",
-        "## Dropped Columns",
-        "",
-        f"- Train-only columns: {setup['dropped_train_only']}",
-        f"- Validation-only columns: {setup['dropped_val_only']}",
-        f"- Non-numeric common columns: {setup['dropped_non_numeric']}",
         "",
     ]
     (output_dir / "baseline_report.md").write_text("\n".join(lines), encoding="utf-8")
@@ -242,39 +254,89 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    data = load_data(args.train_path, args.val_path)
-    X_train = data["X_train"]
-    y_train = data["y_train"]
-    X_val = data["X_val"]
-    y_val = data["y_val"]
-    feature_cols = data["feature_cols"]
+    raw_train = pd.read_parquet(args.train_path)
+    final_train = pd.read_parquet(args.final_train_path)
+    final_val = pd.read_parquet(args.val_path)
+    feature_cols = numeric_feature_columns(raw_train, final_train, final_val)
+
+    selection_sample = sample_by_label_time_strata(
+        raw_train,
+        sample_size=min(args.selection_sample_size, len(raw_train)),
+        random_state=RANDOM_STATE,
+    )
+    selection_train, selection_val = split_within_time_strata(
+        selection_sample,
+        val_frac=args.selection_val_frac,
+    )
+    X_selection_train, y_selection_train, selection_smote_info = smote_to_ratio(
+        selection_train,
+        feature_cols,
+        target_pos_ratio=args.smote_ratio,
+        random_state=RANDOM_STATE,
+    )
+    X_selection_val, y_selection_val = to_xy(selection_val, feature_cols)
+    X_final_train, y_final_train = to_xy(final_train, feature_cols)
+    X_val, y_val = to_xy(final_val, feature_cols)
 
     setup = {
         "train_path": str(args.train_path),
+        "final_train_path": str(args.final_train_path),
         "val_path": str(args.val_path),
         "output_dir": str(args.output_dir),
         "feature_cols": feature_cols,
-        "train_shape": data["train_shape"],
-        "val_shape": data["val_shape"],
-        "train_pos_rate": data["train_pos_rate"],
-        "val_pos_rate": data["val_pos_rate"],
-        "dropped_train_only": data["dropped_train_only"],
-        "dropped_val_only": data["dropped_val_only"],
-        "dropped_non_numeric": data["dropped_non_numeric"],
+        "raw_train_shape": raw_train.shape,
+        "selection_sample_shape": selection_sample.shape,
+        "selection_train_shape": selection_train.shape,
+        "selection_val_shape": selection_val.shape,
+        "selection_train_pos_rate_before_smote": float(selection_train[TARGET_COL].mean()),
+        "selection_train_pos_rate_after_smote": float(y_selection_train.mean()),
+        "selection_val_pos_rate": float(y_selection_val.mean()),
+        "selection_smote_info": selection_smote_info,
+        "final_train_shape": final_train.shape,
+        "final_val_shape": final_val.shape,
+        "final_train_pos_rate": float(y_final_train.mean()),
+        "final_val_pos_rate": float(y_val.mean()),
         "random_state": RANDOM_STATE,
         "threshold": THRESHOLD,
+        "selection_policy": (
+            "sample 500k from train.parquet by label × time stratum; "
+            "split each time stratum into selection train/validation; "
+            "apply SMOTE only to selection train"
+        ),
+        "final_policy": (
+            "refit selected baseline configurations on full train_smote_r10.parquet; "
+            "evaluate once on full val.parquet"
+        ),
     }
     (args.output_dir / "baseline_setup.json").write_text(
         json.dumps(setup, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
+    selection_rows = []
     metrics_rows = []
     params = {}
-    for model_name, model in build_models().items():
-        print(f"\nTraining {model_name} ...", flush=True)
+    for model_name in build_models().keys():
+        print(f"\nSelecting baseline {model_name} on internal split ...", flush=True)
+        selection_model = build_models()[model_name]
+        selection_model.fit(X_selection_train, y_selection_train)
+        selection_prob = predict_positive_probability(selection_model, X_selection_val)
+        selection_threshold = best_threshold(y_selection_val, selection_prob)
+        selection_rows.append(
+            {
+                "model": model_name,
+                "selection_rows": len(y_selection_val),
+                "selection_positive_count": int(y_selection_val.sum()),
+                **evaluate(y_selection_val, selection_prob),
+                "selected_threshold": selection_threshold["threshold"],
+                "selected_threshold_f1": selection_threshold["f1"],
+            }
+        )
+
+        print(f"Training final {model_name} on full SMOTE r10 train ...", flush=True)
+        model = build_models()[model_name]
         start = time.time()
-        model.fit(X_train, y_train)
+        model.fit(X_final_train, y_final_train)
         train_seconds = time.time() - start
 
         val_prob = predict_positive_probability(model, X_val)
@@ -282,6 +344,8 @@ def main() -> None:
             "model": model_name,
             "train_seconds": train_seconds,
             **evaluate(y_val, val_prob),
+            "selected_threshold": selection_threshold["threshold"],
+            "selected_threshold_source": "internal_selection_validation",
         }
         metrics_rows.append(row)
 
@@ -291,6 +355,9 @@ def main() -> None:
                 "feature_cols": feature_cols,
                 "target_col": TARGET_COL,
                 "threshold": THRESHOLD,
+                "selected_threshold": selection_threshold["threshold"],
+                "selected_threshold_source": "internal_selection_validation",
+                "selection_metrics": selection_rows[-1],
                 "params": model.get_params(),
             },
             args.output_dir / f"{model_name}_baseline.joblib",
@@ -302,13 +369,18 @@ def main() -> None:
         params[model_name] = model.get_params()
         print(f"Finished {model_name}: {train_seconds:.2f}s", flush=True)
 
+    selection_df = pd.DataFrame(selection_rows).sort_values("pr_auc_ap", ascending=False)
+    selection_df.to_csv(
+        args.output_dir / "baseline_selection_metrics.csv",
+        index=False,
+    )
     metrics_df = pd.DataFrame(metrics_rows).sort_values("pr_auc_ap", ascending=False)
     metrics_df.to_csv(args.output_dir / "baseline_metrics.csv", index=False)
     (args.output_dir / "baseline_params.json").write_text(
         json.dumps(params, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
-    write_report(args.output_dir, setup, metrics_df)
+    write_report(args.output_dir, setup, selection_df, metrics_df)
     print("\nValidation metrics:")
     print(metrics_df.to_string(index=False))
 

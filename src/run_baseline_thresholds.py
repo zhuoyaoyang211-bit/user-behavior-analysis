@@ -1,9 +1,14 @@
-"""Evaluate traditional baseline models under multiple thresholds."""
+"""Evaluate traditional baseline models under multiple thresholds.
+
+Saved model artifacts carry thresholds selected on the internal train split.
+The full validation threshold sweep here is diagnostic only.
+"""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import joblib
 import pandas as pd
@@ -73,7 +78,7 @@ def score_model(
     model_path: Path,
     val: pd.DataFrame,
     thresholds: list[float],
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Score one saved baseline model under multiple thresholds.
 
     Args:
@@ -82,28 +87,61 @@ def score_model(
         thresholds: Probability thresholds to evaluate.
 
     Returns:
-        Threshold metrics DataFrame for the model.
+        Threshold sweep DataFrame plus the row for the artifact-selected threshold.
     """
     artifact = joblib.load(model_path)
     model = artifact["model"]
     feature_cols = artifact["feature_cols"]
+    model_name = infer_model_name(model_path)
     X_val = val[feature_cols].to_numpy(dtype="float32", copy=True)
     y_val = val[TARGET_COL].to_numpy(dtype="int8", copy=True)
     y_prob = model.predict_proba(X_val)[:, 1]
     metrics = pd.DataFrame(compute_threshold_metrics(y_val, y_prob, thresholds))
-    metrics.insert(0, "model", infer_model_name(model_path))
+    metrics.insert(0, "model", model_name)
     metrics["baseline_version_path"] = str(model_path)
-    return metrics
+    metrics["threshold_source"] = "final_validation_diagnostic_only"
+
+    selected_threshold = artifact.get(
+        "selected_threshold",
+        artifact.get("best_f1_threshold", artifact.get("threshold", 0.5)),
+    )
+    selected_source = artifact.get(
+        "selected_threshold_source",
+        "artifact_threshold_or_default",
+    )
+    selected_metrics = compute_threshold_metrics(
+        y_val,
+        y_prob,
+        [float(selected_threshold)],
+    )[0]
+    selected_row = {
+        "model": model_name,
+        **selected_metrics,
+        "selected_threshold_source": selected_source,
+        "baseline_version_path": str(model_path),
+    }
+    return metrics, selected_row
 
 
-def write_report(output_dir: Path, metrics_df: pd.DataFrame) -> None:
+def write_report(
+    output_dir: Path,
+    selected_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+) -> None:
     """Write markdown threshold analysis report."""
-    view = metrics_df.copy()
-    for col in view.select_dtypes(include=["float"]).columns:
-        view[col] = view[col].map(lambda value: f"{value:.6f}")
-    columns = [
+    def to_markdown_table(df: pd.DataFrame) -> str:
+        view = df.copy()
+        for col in view.select_dtypes(include=["float"]).columns:
+            view[col] = view[col].map(lambda value: f"{value:.6f}")
+        header = "| " + " | ".join(view.columns) + " |"
+        separator = "| " + " | ".join(["---"] * len(view.columns)) + " |"
+        body = ["| " + " | ".join(map(str, row)) + " |" for row in view.to_numpy()]
+        return "\n".join([header, separator, *body])
+
+    selected_columns = [
         "model",
         "threshold",
+        "selected_threshold_source",
         "precision",
         "recall",
         "f1",
@@ -113,19 +151,33 @@ def write_report(output_dir: Path, metrics_df: pd.DataFrame) -> None:
         "fn",
         "tp",
     ]
-    view = view[columns]
-    header = "| " + " | ".join(view.columns) + " |"
-    separator = "| " + " | ".join(["---"] * len(view.columns)) + " |"
-    body = ["| " + " | ".join(map(str, row)) + " |" for row in view.to_numpy()]
+    diagnostic_columns = [
+        "model",
+        "threshold",
+        "threshold_source",
+        "precision",
+        "recall",
+        "f1",
+        "accuracy",
+        "tn",
+        "fp",
+        "fn",
+        "tp",
+    ]
     lines = [
         "# Traditional Baseline Threshold Analysis",
         "",
-        "This report evaluates fixed probability thresholds for saved baseline "
-        "models without retraining.",
+        "Saved model artifacts carry thresholds selected on the internal selection "
+        "validation split. The full validation threshold sweep below is diagnostic "
+        "only and is not used to choose thresholds.",
         "",
-        header,
-        separator,
-        *body,
+        "## Artifact-Selected Thresholds on Final Validation",
+        "",
+        to_markdown_table(selected_df[selected_columns]),
+        "",
+        "## Final Validation Threshold Diagnostics",
+        "",
+        to_markdown_table(metrics_df[diagnostic_columns]),
         "",
     ]
     (output_dir / "traditional_threshold_report.md").write_text(
@@ -142,18 +194,29 @@ def main() -> None:
     logger.info("Loading validation data from %s", args.val_path)
     val = pd.read_parquet(args.val_path)
     rows = []
+    selected_rows = []
     for model_path in args.model_paths:
         logger.info("Scoring %s", model_path)
-        rows.append(score_model(model_path, val, args.thresholds))
+        threshold_df, selected_row = score_model(model_path, val, args.thresholds)
+        rows.append(threshold_df)
+        selected_rows.append(selected_row)
 
     metrics_df = pd.concat(rows, ignore_index=True).sort_values(
         ["model", "f1", "precision"],
         ascending=[True, False, False],
     )
+    selected_df = pd.DataFrame(selected_rows).sort_values(
+        ["f1", "precision"],
+        ascending=[False, False],
+    )
+    selected_path = args.output_dir / "traditional_selected_threshold_metrics.csv"
+    selected_df.to_csv(selected_path, index=False)
     metrics_path = args.output_dir / "traditional_threshold_metrics.csv"
     metrics_df.to_csv(metrics_path, index=False)
-    write_report(args.output_dir, metrics_df)
+    write_report(args.output_dir, selected_df, metrics_df)
+    logger.info("Selected threshold metrics saved to %s", selected_path)
     logger.info("Threshold metrics saved to %s", metrics_path)
+    logger.info("\n%s", selected_df.to_string(index=False))
     logger.info("\n%s", metrics_df.to_string(index=False))
 
 
