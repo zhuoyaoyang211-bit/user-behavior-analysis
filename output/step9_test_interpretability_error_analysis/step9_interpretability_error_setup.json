@@ -1,0 +1,61 @@
+{
+  "test_path": "/Users/yangzhuoyao/Desktop/阿里/项目1/output/test.parquet",
+  "model_path": "/Users/yangzhuoyao/Desktop/阿里/项目1/output/optuna_tuned_models/xgboost_optuna.joblib",
+  "prediction_path": "/Users/yangzhuoyao/Desktop/阿里/项目1/output/step9_test_model_evaluation/step9_test_predictions.csv",
+  "output_dir": "/Users/yangzhuoyao/Desktop/阿里/项目1/output/step9_test_interpretability_error_analysis",
+  "target_col": "label",
+  "feature_cols": [
+    "item_pv_count",
+    "item_fav_count",
+    "item_cart_count",
+    "item_buy_count",
+    "item_buy_user_count",
+    "item_pv_to_buy_rate",
+    "item_cart_to_buy_rate",
+    "item_repurchase_user_count",
+    "cat_pv_count",
+    "cat_view_user_count",
+    "user_pv_count",
+    "day_pct",
+    "night_pct",
+    "buy_conversion_rate",
+    "fav_to_buy_rate",
+    "cart_to_buy_rate",
+    "repurchase_item_count",
+    "item_decay_slope",
+    "user_avg_interval_hours",
+    "rfm_r_score",
+    "rfm_f_score",
+    "rfm_m_score",
+    "user_category_pref_score",
+    "item_category_te"
+  ],
+  "threshold": 0.2,
+  "threshold_source": "internal_tuning_validation",
+  "shap_sample_size": 10000,
+  "shap_sample_rows": 10000,
+  "shap_positive_count": 449,
+  "shap_negative_count": 9551,
+  "shap_positive_rate": 0.0449,
+  "segment_thresholds": {
+    "cold_start_user": {
+      "entity_col": "user_id",
+      "feature_col": "user_pv_count",
+      "entity_count": 9447,
+      "selected_entity_count": 1890,
+      "feature_threshold": -0.8731439113616943
+    },
+    "long_tail_item": {
+      "entity_col": "item_id",
+      "feature_col": "item_pv_count",
+      "entity_count": 404268,
+      "selected_entity_count": 80854,
+      "feature_threshold": -0.32861319184303284
+    }
+  },
+  "n_rows": 468316,
+  "positive_count": 449,
+  "negative_count": 467867,
+  "positive_rate": 0.0009587543453565541,
+  "elapsed_seconds": 26.079315900802612
+}
